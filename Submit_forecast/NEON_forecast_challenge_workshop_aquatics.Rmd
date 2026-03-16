@@ -202,7 +202,7 @@ You can read more about the NOAA forecasts available for the NEON sites [here:](
 
 ### Download historic data
 
-We will generate a water temperature forecast using `air_temperature` as a co-variate.
+We will generate a water temperature forecast using `air_temperature` as a co-variate.1
 Note: This code chunk can take a few minutes to execute as it accesses the NOAA data.
 
 ```{r, message=FALSE}
@@ -466,7 +466,7 @@ neon4cast::forecast_output_validator(forecast_file_1)
 
 ```{r eval = FALSE}
 # can uses the neon4cast::forecast_output_validator() to check the forecast is in the right format
-neon4cast::submit(forecast_file = forecast_file_1),
+neon4cast::submit(forecast_file = forecast_file_1,
                   ask = FALSE) # if ask = T (default), it will produce a pop-up box asking if you want to submit
 ```
 

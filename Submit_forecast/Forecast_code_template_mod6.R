@@ -87,7 +87,9 @@ weather_future_daily <- weather_future |>
 
 #--------------------------#
 
-
+forecast_horizon <- 30
+forecasted_dates <- seq(from = ymd(forecast_date), to = ymd(forecast_date) + forecast_horizon, by = "day")
+n_members <- 31
 
 # ----- Fit model & generate forecast----
 
@@ -110,31 +112,48 @@ for(i in 1:length(focal_sites)) {
   noaa_future_site <- weather_future_daily |> 
     filter(site_id == curr_site)
   
+  weather_ensemble_names <- unique(noaa_future_site$parameter)
+  
   #Fit linear model based on past data: water temperature = m * air temperature + b
   #you will need to change the variable on the left side of the ~ if you are forecasting oxygen or chla
   fit <- lm(site_target$temperature ~ site_target$air_temperature)
   # fit <- lm(site_target$temperature ~ ....)
   
-  # use linear regression to forecast water temperature for each ensemble member
-  # You will need to modify this line of code if you add additional weather variables or change the form of the model
-  # The model here needs to match the model used in the lm function above (or what model you used in the fit)
-  forecasted_temperature <- fit$coefficients[1] + fit$coefficients[2] * noaa_future_site$air_temperature
+  # Loop through all forecast dates
+  for (t in 1:length(forecasted_dates)) {
+    
+    # use linear regression to forecast water temperature for each ensemble member
+    # You will need to modify this line of code if you add additional weather variables or change the form of the model
+    # The model here needs to match the model used in the lm function above (or what model you used in the fit)
+    
+    # Loop over each ensemble member
+    for(ens in 1:n_members){
+      
+      met_ens <- weather_ensemble_names[ens]
+      
+      #pull driver ensemble for the relevant date; here we are using all 31 NOAA ensemble members
+      temp_driv <- weather_future_daily %>%
+        filter(datetime == forecasted_dates[t],
+               site_id == curr_site,
+               parameter == met_ens)
+      
+      forecasted_temperature <- fit$coefficients[1] + fit$coefficients[2] * temp_driv$air_temperature
+      
+      # put all the relevant information into a tibble that we can bind together
+      curr_site_df <- tibble(datetime = forecasted_dates[t],
+                             site_id = curr_site,
+                             parameter = met_ens,
+                             prediction = forecasted_temperature,
+                             variable = "temperature") #Change this if you are forecasting a different variable
+      
+      forecast_df <- dplyr::bind_rows(forecast_df, curr_site_df)
+      
+    }
+  }
   
-  # put all the relevant information into a tibble that we can bind together
-  curr_site_df <- tibble(datetime = noaa_future_site$datetime,
-                         site_id = curr_site,
-                         parameter = noaa_future_site$parameter,
-                         prediction = forecasted_temperature,
-                         variable = "temperature") #Change this if you are forecasting a different variable
-  
-  forecast_df <- dplyr::bind_rows(forecast_df, curr_site_df)
-  message(curr_site, 'forecast run')
+  message(curr_site, ' forecast run')
   
 }
-
-
-#--------------------------#
-
 
 #---- Covert to EFI standard ----
 
@@ -175,6 +194,5 @@ forecast_df_EFI |>
   labs(title = paste0('Forecast generated for ', forecast_df_EFI$variable[1], ' on ', forecast_df_EFI$reference_datetime[1]))
 
 plot_file_name <- paste0("Submit_forecast/", forecast_df_EFI$variable[1], '-', forecast_df_EFI$reference_datetime[1], ".png")
-ggsave(plot_file_name, path = "C:/Users/caitl/OneDrive - Virginia Tech/Spring 26/Ecological Modeling/NEON-forecast-challenge-workshop/Submit_forecast")
-
+ggsave(plot_file_name)
 
