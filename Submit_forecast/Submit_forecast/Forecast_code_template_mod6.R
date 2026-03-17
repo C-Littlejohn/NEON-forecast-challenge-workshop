@@ -153,7 +153,8 @@ for(i in 1:length(focal_sites)) {
                site_id == curr_site,
                parameter == met_ens)
       
-      forecasted_temperature <- param_df$beta1[ens] + param_df$beta2[ens] * temp_driv$air_temperature + rnorm(n = n_members, mean = 0, sd = sigma)
+      forecasted_temperature <- param_df$beta1[ens] + param_df$beta2[ens] * temp_driv$air_temperature + rnorm(1, 0, sd = sigma)
+    
       
       # put all the relevant information into a tibble that we can bind together
       curr_site_df <- tibble(datetime = forecasted_dates[t],
