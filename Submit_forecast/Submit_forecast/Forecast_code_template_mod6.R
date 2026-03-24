@@ -66,6 +66,7 @@ weather_past_daily <- weather_past |>
   mutate(prediction = ifelse(variable == "air_temperature", prediction - 273.15, prediction)) |> 
   pivot_wider(names_from = variable, values_from = prediction)
 
+
 # Future weather forecast --------
 # New forecast only available at 5am UTC the next day
 forecast_date <- Sys.Date() 
@@ -93,7 +94,7 @@ weather_future_daily <- weather_future |>
 
 forecast_horizon <- 30
 forecasted_dates <- seq(from = ymd(forecast_date), to = ymd(forecast_date) + forecast_horizon, by = "day")
-n_members <- 31
+n_members <- 310
 
 # ----- Fit model & generate forecast----
 
@@ -102,6 +103,17 @@ targets_lm <- targets |>
   pivot_wider(names_from = 'variable', values_from = 'observation') |> 
   left_join(weather_past_daily, 
             by = c("datetime","site_id"))
+
+#add temp lag to targets
+targets_lm <- targets_lm |> 
+  arrange(site_id, datetime) |> 
+  group_by(site_id) |> 
+  mutate(temp_lag1 = lag(temperature, 1),
+         air_temp_lag1 = lag(air_temperature, 1),
+         air_temp_lag2 = lag(air_temperature, 2),
+         air_temp_lag3 = lag(air_temperature, 3),
+         air_temp_3day_mean = (air_temp_lag1 + air_temp_lag2 + air_temp_lag3) / 3) |> 
+  ungroup()
 
 # Loop through each site to fit the model
 forecast_df <- NULL
@@ -120,7 +132,7 @@ for(i in 1:length(focal_sites)) {
   
   #Fit linear model based on past data: water temperature = m * air temperature + b
   #you will need to change the variable on the left side of the ~ if you are forecasting oxygen or chla
-  fit <- lm(site_target$temperature ~ site_target$air_temperature)
+  fit <- lm(temperature ~ air_temperature + temp_lag1 + air_temp_3day_mean, data = site_target)
   fit_summary <- summary(fit)
   # fit <- lm(site_target$temperature ~ ....)
   
@@ -131,8 +143,17 @@ for(i in 1:length(focal_sites)) {
   residuals <- fit$residuals
   sigma <- sd(residuals, na.rm = TRUE) 
   
+  # initial condition distribution (last observed temp)
+  last_obs <- tail(na.omit(site_target$temperature), 1)
+  
+  init_lag <- rnorm(n_members, mean = last_obs, sd = sigma)
+  
+  lag_vals <- init_lag
+  
   param_df <- data.frame(beta1 = rnorm(n_members, coeffs[1], params_se[1]),
-                         beta2 = rnorm(n_members, coeffs[2], params_se[2]))
+                         beta2 = rnorm(n_members, coeffs[2], params_se[2]),
+                         beta3 = rnorm(n_members, coeffs[3], params_se[3]),
+                         beta4 = rnorm(n_members, coeffs[4], params_se[4]))
 
   
   # Loop through all forecast dates
@@ -143,9 +164,16 @@ for(i in 1:length(focal_sites)) {
     # The model here needs to match the model used in the lm function above (or what model you used in the fit)
     
     # Loop over each ensemble member
+    met_ens_id <- 0
     for(ens in 1:n_members){
+      if(met_ens_id <= 30){
+        met_ens_id <- met_ens_id + 1
+        ens_nm <- paste0(ens, "-", met_ens_id)
+      }else{
+        met_ens_id <- 1
+      }
       
-      met_ens <- weather_ensemble_names[ens]
+      met_ens <- weather_ensemble_names[met_ens_id]
       
       #pull driver ensemble for the relevant date; here we are using all 31 NOAA ensemble members
       temp_driv <- weather_future_daily %>%
@@ -153,13 +181,24 @@ for(i in 1:length(focal_sites)) {
                site_id == curr_site,
                parameter == met_ens)
       
-      forecasted_temperature <- param_df$beta1[ens] + param_df$beta2[ens] * temp_driv$air_temperature + rnorm(1, 0, sd = sigma)
     
+      
+      
+      
+      forecasted_temperature <- param_df$beta1[met_ens_id] + 
+        param_df$beta2[met_ens_id] * temp_driv$air_temperature + 
+        param_df$beta3[met_ens_id] * lag_vals[met_ens_id] + 
+        param_df$beta4[met_ens_id] * air_temp_3day_mean +
+        rnorm(1, 0, sd = sigma)
+      
+      lag_vals[met_ens_id] <- forecasted_temperature
+    
+   
       
       # put all the relevant information into a tibble that we can bind together
       curr_site_df <- tibble(datetime = forecasted_dates[t],
                              site_id = curr_site,
-                             parameter = met_ens,
+                             parameter = ens_nm,
                              prediction = forecasted_temperature,
                              variable = "temperature") #Change this if you are forecasting a different variable
       
