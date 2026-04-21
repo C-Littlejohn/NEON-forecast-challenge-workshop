@@ -1,0 +1,242 @@
+---
+title: "Reforecast Assignment"
+format: 
+  html:
+    embed-resources: true
+editor: visual
+---
+
+```{r}
+
+## install.packages('remotes')
+## install.packages('tidyverse') # collection of R packages for data manipulation, analysis, and visualisation
+## install.packages('lubridate') # working with dates and times
+## remotes::install_github('eco4cast/neon4cast') # package from NEON4cast challenge organisers to assist with forecast building and submission
+
+# ------ Load packages -----
+library(tidyverse)
+library(lubridate)
+library(scoringRules)
+library(purrr)
+library(duckdbfs)
+#--------------------------#
+
+# Change this for your model ID
+# Include the word "example" in my_model_id for a test submission
+# Don't include the word "example" in my_model_id for a forecast that you have registered (see neon4cast.org for the registration form)
+my_model_id <- 'example_ID'
+
+# --Model description--- #
+
+# Add a brief description of your modeling approach
+
+# -- Uncertainty representation -- #
+
+# Describe what sources of uncertainty are included in your forecast and how you estimate each source.
+
+#------- Read data --------
+# read in the targets data
+targets <- read_csv("https://sdsc.osn.xsede.org/bio230014-bucket01/challenges/targets/project_id=neon4cast/duration=P1D/aquatics-targets.csv.gz")
+
+
+# read in the sites data
+aquatic_sites <- read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-ci/refs/heads/main/neon4cast_field_site_metadata.csv") |>
+  dplyr::filter(aquatics == 1)
+
+focal_sites <- aquatic_sites |> 
+  filter(field_site_subtype == 'Lake') |> 
+  pull(field_site_id)
+
+focal_sites <- "BARC"
+
+# Filter the targets
+targets <- targets %>%
+  filter(site_id %in% focal_sites,
+         variable == 'temperature')
+#--------------------------#
+
+
+
+# ------ Weather data ------
+met_variables <- c("air_temperature")
+
+# Past stacked weather -----
+weather_past_s3 <- neon4cast::noaa_stage3()
+
+weather_past <- weather_past_s3  |> 
+  dplyr::filter(site_id %in% focal_sites,
+                datetime >= ymd('2017-01-01'),
+                variable %in% met_variables) |> 
+  dplyr::collect()
+
+# aggregate the past to mean values
+weather_past_daily <- weather_past |> 
+  mutate(datetime = as_date(datetime)) |> 
+  group_by(datetime, site_id, variable) |> 
+  summarize(prediction = mean(prediction, na.rm = TRUE), .groups = "drop") |> 
+  # convert air temperature to Celsius if it is included in the weather data
+  mutate(prediction = ifelse(variable == "air_temperature", prediction - 273.15, prediction)) |> 
+  pivot_wider(names_from = variable, values_from = prediction)
+
+# Future weather forecast --------
+# New forecast only available at 5am UTC the next day
+
+
+#--------------------------#
+
+forecast_horizon <- 30
+
+n_members <- 31
+
+#set reference datetime
+ref_datetime <- seq(as.Date("2025-01-01"), as.Date("2025-12-31"), by = "7 day")
+
+
+# ----- Fit model & generate forecast----
+
+# Generate a dataframe to fit the model to 
+targets_lm <- targets |> 
+  pivot_wider(names_from = 'variable', values_from = 'observation') |> 
+  left_join(weather_past_daily, 
+            by = c("datetime","site_id"))
+
+
+
+# Loop through each site to fit the model
+forecast_df <- NULL
+
+for(i in 1:length(focal_sites)) {  
+  
+  curr_site <- focal_sites[i]
+  
+  site_target <- targets_lm |>
+    filter(site_id == curr_site)
+  
+ 
+#Reforecast Loop
+    
+  for(rd in 1:length(ref_datetime)) {
+    
+    print(ref_datetime[rd])
+    training_data_trimmed <- site_target |> 
+      filter(datetime < ref_datetime[rd])
+    forecasted_dates <- seq(from = ref_datetime[rd], to = ref_datetime[rd] + days(forecast_horizon), by = "day")
+  
+    forecast_date <- as.Date(ref_datetime[rd]) 
+    noaa_date <- forecast_date - days(1)
+    
+    weather_future_s3 <- neon4cast::noaa_stage2(start_date = as.character(noaa_date))
+    
+    weather_future <- weather_future_s3 |> 
+      dplyr::filter(datetime >= forecast_date,
+                    site_id %in% focal_sites,
+                    variable %in% met_variables) |> 
+      collect()
+    
+    weather_future_daily <- weather_future |> 
+      mutate(datetime = as_date(datetime)) |> 
+      # mean daily forecasts at each site per ensemble
+      group_by(datetime, site_id, parameter, variable) |> 
+      summarize(prediction = mean(prediction, na.rm = TRUE), .groups = "drop") |> 
+      # convert air temperature to Celsius if it is included in the weather data
+      mutate(prediction = ifelse(variable == "air_temperature", prediction - 273.15, prediction)) |> 
+      pivot_wider(names_from = variable, values_from = prediction) |> 
+      select(any_of(c('datetime', 'site_id', met_variables, 'parameter')))
+    
+    noaa_future_site <- weather_future_daily |> 
+      filter(site_id == curr_site)
+    weather_ensemble_names <- unique(noaa_future_site$parameter)
+    
+  
+  #Fit linear model based on past data: water temperature = m * air temperature + b
+  #you will need to change the variable on the left side of the ~ if you are forecasting oxygen or chla
+  fit <- lm(temperature ~ air_temperature, data = training_data_trimmed)
+  # fit <- lm(site_target$temperature ~ ....)
+  
+  coeffs <- round(fit$coefficients, 2)
+  fit_summary <- summary(fit)
+  params_se <- fit_summary$coefficients[,2]
+  residuals <- fit$residuals
+  sigma <- sd(residuals, na.rm = TRUE) 
+  
+  param_df <- data.frame(beta1 = rnorm(n_members, coeffs[1], params_se[1]),
+                         beta2 = rnorm(n_members, coeffs[2], params_se[2]))
+    
+  #combined_met <- stage_3_trim + weather_future_daily[rd]
+   
+   # Loop through all forecast dates
+    for (t in 1:length(forecasted_dates)) {
+      
+      # use linear regression to forecast water temperature for each ensemble member
+      # You will need to modify this line of code if you add additional weather variables or change the form of the model
+      # The model here needs to match the model used in the lm function above (or what model you used in the fit)
+      
+      # Loop over each ensemble member
+      for(ens in 1:n_members){
+        
+        met_ens <- weather_ensemble_names[ens]
+        
+        #pull driver ensemble for the relevant date; here we are using all 31 NOAA ensemble members
+        temp_driv <- weather_future_daily %>%
+          filter(datetime == forecasted_dates[t],
+                 site_id == curr_site,
+                 parameter == met_ens)
+        
+        forecasted_temperature <- param_df$beta1[ens] + 
+          param_df$beta2[ens] * temp_driv$air_temperature
+        
+        # put all the relevant information into a tibble that we can bind together
+        curr_site_df <- tibble(datetime = forecasted_dates[t],
+                               site_id = curr_site,
+                               parameter = met_ens,
+                               prediction = forecasted_temperature,
+                               reference_datetime = as_datetime(ref_datetime[rd]),
+                               variable = "temperature") #Change this if you are forecasting a different variable
+        
+        forecast_df <- dplyr::bind_rows(forecast_df, curr_site_df)
+        
+      }
+    }
+  }  
+  message(curr_site, ' forecast run')
+  
+}
+
+# ------ Calculate and plot CRPS ------
+
+#Crps of reforecast
+crps_df <- forecast_df |>
+  left_join(targets |> select(datetime, site_id, variable, observation),
+            by = c("datetime", "site_id", "variable")) |>
+  filter(!is.na(observation)) |>
+  mutate(horizon = as.numeric(as.Date(datetime) - as.Date(reference_datetime))) |>
+  group_by(horizon, datetime, site_id, reference_datetime) |>
+  summarize(crps = crps_sample(y = first(observation), dat = prediction), .groups = "drop") |>
+  group_by(horizon) |>
+  summarize(mean_crps = mean(crps, na.rm = TRUE))
+
+ baseline_models <- arrow::open_dataset("s3://anonymous@bio230014-bucket01/challenges/scores/bundled-parquet/project_id=neon4cast/duration=P1D/variable=temperature?endpoint_override=sdsc.osn.xsede.org") |> 
+  filter(site_id == "BARC",
+         reference_datetime > lubridate::as_datetime("2025-01-01"),
+         reference_datetime < lubridate::as_datetime("2025-12-31"),
+         model_id %in% c("climatology", "persistenceRW")) |> 
+  collect() 
+
+mean_crps_baseline <- baseline_models |> 
+  mutate(horizon = as.numeric(datetime - reference_datetime)) |> 
+  summarize(mean_crps = mean(crps, na.rm = TRUE), .by = c("model_id", "horizon")) |> 
+  pivot_wider(names_from = model_id, values_from = mean_crps)
+  
+#put reforecast crps and baseline models crps all together
+mean_crps_baseline_trimmed <- mean_crps_baseline %>% slice(1:(n() - 4))
+
+all_crps <- left_join(mean_crps_baseline_trimmed, crps_df, by = c("horizon"))
+
+#plot on one plot
+ggplot(data = all_crps, aes(x = horizon)) +
+  geom_line(aes(y = persistenceRW, color = "persistenceRW")) +
+  geom_line(aes(y = climatology, color = "climatology")) +
+  geom_line(aes(y = mean_crps, color = "my_model")) +
+  labs(x = "Horizon", y = "CRPS")
+ 
+```
